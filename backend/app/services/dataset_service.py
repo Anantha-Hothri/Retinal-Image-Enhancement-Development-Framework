@@ -38,47 +38,88 @@ class DatasetService:
     def find_clarus_pair(self, zeiss_image_name: str) -> Optional[Dict[str, str]]:
         """
         Find the corresponding Clarus image for a given Zeiss image.
-        
+
+        Uses Excel mapping with columns: 'Parent folder', 'Zeiss name', 'Clarus name'
+
         Args:
-            zeiss_image_name: Name of the Zeiss image file
-        
+            zeiss_image_name: Full path or name of the Zeiss image file
+
         Returns:
             Dictionary with paths to Zeiss and Clarus images, or None if not found
         """
         if self.df is None:
+            print("⚠️ Dataset mapping not loaded")
             return None
-        
-        # Search for matching Zeiss image name in the dataframe
-        zeiss_basename = os.path.basename(zeiss_image_name).lower()
-        
-        # Try to find patient folder from filename
+
+        # Get just the filename from the path
+        zeiss_basename = os.path.basename(zeiss_image_name)
+
+        print(f"🔍 Looking for Clarus pair for Zeiss image: {zeiss_basename}")
+
+        # Strategy 1: Try exact filename match in 'Zeiss name' column
+        # Case-insensitive comparison
+        matching_rows = self.df[self.df['Zeiss name'].str.lower() == zeiss_basename.lower()]
+
+        if not matching_rows.empty:
+            # Use the first match
+            row = matching_rows.iloc[0]
+            patient_id = str(row['Parent folder'])
+            clarus_name = row['Clarus name']
+
+            print(f"✓ Found match: Patient {patient_id}, Clarus: {clarus_name}")
+
+            # Build paths
+            patient_folder = Path("patient_images") / patient_id
+            zeiss_folder = patient_folder / "ZEISS - LOW QUALITY"
+            clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
+
+            # Construct full paths
+            zeiss_path = zeiss_folder / zeiss_basename
+            clarus_path = clarus_folder / clarus_name
+
+            # Verify files exist
+            if zeiss_path.exists() and clarus_path.exists():
+                return {
+                    "patient_id": patient_id,
+                    "zeiss_path": str(zeiss_path),
+                    "clarus_path": str(clarus_path),
+                    "zeiss_name": zeiss_basename,
+                    "clarus_name": clarus_name
+                }
+            else:
+                print(f"⚠️ Files not found on disk:")
+                print(f"   Zeiss: {zeiss_path} (exists: {zeiss_path.exists()})")
+                print(f"   Clarus: {clarus_path} (exists: {clarus_path.exists()})")
+
+        # Strategy 2: Try to extract patient ID and find by folder
         patient_id = self._extract_patient_id(zeiss_basename)
-        if patient_id is None:
-            return None
-        
-        # Look for this patient in the dataset
-        patient_row = self.df[self.df['Parent folder'].astype(str) == str(patient_id)]
-        
-        if patient_row.empty:
-            print(f"⚠️ No matching patient found for ID: {patient_id}")
-            return None
-        
-        # Get paths
-        patient_folder = Path("patient_images") / str(patient_id)
-        zeiss_folder = patient_folder / "ZEISS - LOW QUALITY"
-        clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
-        
-        # Find first image in each folder
-        zeiss_path = self._find_first_image(zeiss_folder)
-        clarus_path = self._find_first_image(clarus_folder)
-        
-        if zeiss_path and clarus_path:
-            return {
-                "patient_id": patient_id,
-                "zeiss_path": str(zeiss_path),
-                "clarus_path": str(clarus_path)
-            }
-        
+        if patient_id:
+            print(f"🔍 Trying patient ID: {patient_id}")
+            patient_rows = self.df[self.df['Parent folder'].astype(str) == patient_id]
+
+            if not patient_rows.empty:
+                # Take first row for this patient
+                row = patient_rows.iloc[0]
+                clarus_name = row['Clarus name']
+
+                patient_folder = Path("patient_images") / patient_id
+                zeiss_folder = patient_folder / "ZEISS - LOW QUALITY"
+                clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
+
+                # Find matching Zeiss file (case-insensitive)
+                zeiss_path = self._find_matching_image(zeiss_folder, zeiss_basename)
+                clarus_path = clarus_folder / clarus_name
+
+                if zeiss_path and zeiss_path.exists() and clarus_path.exists():
+                    return {
+                        "patient_id": patient_id,
+                        "zeiss_path": str(zeiss_path),
+                        "clarus_path": str(clarus_path),
+                        "zeiss_name": zeiss_basename,
+                        "clarus_name": clarus_name
+                    }
+
+        print(f"❌ No Clarus pair found for {zeiss_basename}")
         return None
     
     def _extract_patient_id(self, filename: str) -> Optional[str]:
@@ -100,13 +141,26 @@ class DatasetService:
         """Find the first image file in a folder."""
         if not folder_path.exists():
             return None
-        
+
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-        
+
         for file in folder_path.iterdir():
             if file.suffix.lower() in image_extensions:
                 return file
-        
+
+        return None
+
+    def _find_matching_image(self, folder_path: Path, target_name: str) -> Optional[Path]:
+        """Find image file matching target name (case-insensitive)."""
+        if not folder_path.exists():
+            return None
+
+        target_lower = target_name.lower()
+
+        for file in folder_path.iterdir():
+            if file.name.lower() == target_lower:
+                return file
+
         return None
     
     def create_overlay_visualization(self, zeiss_img: np.ndarray, clarus_img: np.ndarray, 
