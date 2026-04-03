@@ -1,0 +1,164 @@
+# Retinal Image Enhancement Configuration
+
+# Dataset Configuration
+dataset:
+  root_dir: "patient_images"
+  manifest_file: "patient_images/patient_images_report.xlsx"
+  output_dir: "outputs"
+  num_pairs: 352
+  train_split: 300
+  val_split: 52
+  random_seed: 42
+
+# Data Preprocessing
+preprocessing:
+  # DCP Dehazing for Zeiss images
+  dcp:
+    patch_size: 15
+    omega: 0.95
+    atmospheric_light_percentile: 0.1
+    guided_filter_radius: 60
+    guided_filter_eps: 0.001
+    t0: 0.1  # minimum transmission
+  
+  # CLAHE parameters
+  clahe:
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+  
+  # Fundus masking
+  mask:
+    threshold: 10
+    erosion_size: 20
+    closing_kernel_size: 25
+
+# Feature Detection & Registration
+registration:
+  methods: ["SIFT", "ORB", "AKAZE"]
+  sift:
+    nfeatures: 20000
+    contrast_threshold: 0.03
+    edge_threshold: 10
+  orb:
+    nfeatures: 20000
+  ransac:
+    threshold: 5.0
+    min_inliers: 4
+  ratio_test:
+    sift: 0.75
+    akaze: 0.75
+    orb: 0.80
+
+# Model Architecture
+model:
+  # SFT-Real-ESRGAN Generator
+  pretrained_rrdb_path: "models/RealESRGAN_x4plus.pth"
+  unet_weights_path: "models/drive_unet.pth"
+  num_channels: 64
+  num_rrdb_blocks: 23
+  scale_factor: 4
+  freeze_backbone: true  # Train only SFT layers initially
+
+# Discriminator Configuration
+discriminator:
+  discriminator_filters: 64
+  discriminator_layers: 3
+  use_spectral_norm: true
+  use_multiscale_discriminator: false
+  num_discriminators: 2
+
+# Dataset Configuration
+dataset:
+  train_csv: "outputs/data/train_pairs.csv"
+  val_csv: "outputs/data/val_pairs.csv"
+  target_size: [512, 512]  # Must be 512 for 4x upscaling model
+  vessel_maps_dir: "outputs/vessel_maps"
+
+# Training Configuration
+training:
+  num_epochs: 200
+  batch_size: 1  # Reduced for CPU testing
+  num_workers: 0  # Set to 0 to avoid multiprocessing issues on CPU
+
+  # Optimizers
+  lr_generator: 0.0001
+  lr_discriminator: 0.0001
+
+  # Learning rate decay
+  lr_decay_step: 50
+  lr_decay_gamma: 0.5
+
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  log_dir: "outputs/logs"
+  save_interval: 10
+
+  # Data augmentation
+  augmentation:
+    horizontal_flip_prob: 0.5
+    vertical_flip_prob: 0.5
+    rotation_90_prob: 0.5
+    brightness_contrast_prob: 0.3
+    brightness_limit: 0.1
+    contrast_limit: 0.1
+
+# Loss Configuration
+loss:
+  lambda_pixel: 1.0
+  lambda_perceptual: 1.0
+  lambda_gan: 0.1
+  lambda_vessel: 0.5
+
+# FOV Extension & Blending
+blending:
+  gaussian_sigma: 40  # Width of blend zone
+  sigma_candidates: [20, 30, 40, 50]  # For tuning
+
+# Metrics Configuration
+metrics:
+  # Vessel detection parameters
+  frangi:
+    sigmas: [1, 2, 3, 4, 5, 6]
+    vessel_percentile: 80
+  
+  # Target thresholds
+  thresholds:
+    vessel_recovery_ratio: 0.8
+    disc_offset_px: 15
+    ssim: 0.90
+    ncc: 0.85
+  
+  # Reliability flags
+  min_overlap_fraction: 0.02
+  min_inlier_count: 4
+
+# Backend API Configuration
+backend:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  reload: true
+  log_level: "info"
+  cors_origins:
+    - "http://localhost:3000"
+    - "https://your-vercel-domain.vercel.app"
+  
+  # File upload limits
+  max_upload_size: 52428800  # 50 MB
+  allowed_formats: [".png", ".jpg", ".jpeg", ".dcm", ".dicom"]
+  
+  # Redis configuration for async tasks
+  redis_url: "redis://localhost:6379/0"
+  celery_broker: "redis://localhost:6379/1"
+
+# Deployment
+deployment:
+  vercel:
+    framework: "nextjs"
+    build_command: "cd frontend && npm run build"
+    output_directory: "frontend/.next"
+  
+  docker:
+    backend_image: "retinal-enhancement-backend:latest"
+    frontend_image: "retinal-enhancement-frontend:latest"
+

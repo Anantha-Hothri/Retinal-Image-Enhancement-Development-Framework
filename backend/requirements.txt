@@ -1,0 +1,17 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+aiofiles==23.2.1
+pillow==10.1.0
+
+# ML dependencies (shared with main project)
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+scikit-image>=0.21.0
+pyyaml>=6.0
+requests>=2.31.0
+
