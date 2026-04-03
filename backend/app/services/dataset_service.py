@@ -227,43 +227,231 @@ class DatasetService:
                 return file
 
         return None
+
+    def _preprocess_for_registration(self, img: np.ndarray) -> np.ndarray:
+        """
+        Preprocess retinal image for feature detection.
+        Uses green channel + CLAHE for best vessel contrast.
+        """
+        if len(img.shape) == 3:
+            green = img[:, :, 1]
+        else:
+            green = img
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(green)
+        return enhanced
+
+    def _create_retinal_mask(self, img_gray: np.ndarray, erosion_size: int = 20) -> np.ndarray:
+        """
+        Create mask to exclude black circular borders in retinal images.
+        """
+        try:
+            # Threshold to get bright regions
+            _, mask = cv2.threshold(img_gray, 10, 255, cv2.THRESH_BINARY)
+
+            # Find largest contour (retinal area)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return mask
+
+            largest_contour = max(contours, key=cv2.contourArea)
+            clean_mask = np.zeros_like(mask)
+            cv2.drawContours(clean_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
+
+            # Erode to avoid border artifacts
+            kernel = np.ones((erosion_size, erosion_size), np.uint8)
+            eroded_mask = cv2.erode(clean_mask, kernel, iterations=1)
+
+            return eroded_mask
+        except Exception as e:
+            print(f"   ⚠️  Mask creation failed: {e}")
+            return np.ones_like(img_gray, dtype=np.uint8) * 255
     
     def create_overlay_visualization(self, zeiss_img: np.ndarray, clarus_img: np.ndarray,
                                     alpha: float = 0.5) -> np.ndarray:
         """
-        Create overlay visualization of Clarus resized to Zeiss dimensions.
+        Create overlay visualization using proper image registration.
 
-        This maintains the original Zeiss image size and resizes Clarus to match it,
-        which is correct since we want to see how well the Zeiss image registers
-        with the ground truth at the original Zeiss resolution.
+        This performs feature-based registration to align the small Zeiss FOV
+        with the corresponding region in the larger Clarus image, then creates
+        an overlay where:
+        - The Zeiss image is warped to align with Clarus coordinates
+        - The output is at full Clarus resolution
+        - Only the overlapping region shows the blend
 
         Args:
-            zeiss_img: Zeiss image (BGR) - this size will be preserved
-            clarus_img: Clarus image (BGR) - will be resized to match Zeiss
+            zeiss_img: Zeiss image (BGR) - smaller FOV
+            clarus_img: Clarus image (BGR) - larger FOV
             alpha: Blending factor (0.5 = 50% each image)
 
         Returns:
-            Overlay image at Zeiss dimensions
+            Overlay image at Clarus dimensions with registered Zeiss
         """
-        print(f"🎨 Creating overlay: Zeiss {zeiss_img.shape} | Clarus {clarus_img.shape}")
+        print(f"\n{'='*70}")
+        print(f"🎨 CREATING REGISTERED OVERLAY")
+        print(f"{'='*70}")
+        print(f"Zeiss size:  {zeiss_img.shape}")
+        print(f"Clarus size: {clarus_img.shape}")
 
-        # Resize Clarus to match Zeiss dimensions (NOT the other way around)
-        if zeiss_img.shape != clarus_img.shape:
-            clarus_resized = cv2.resize(clarus_img,
-                                       (zeiss_img.shape[1], zeiss_img.shape[0]),
-                                       interpolation=cv2.INTER_CUBIC)
-            print(f"   Resized Clarus to {clarus_resized.shape} to match Zeiss")
-        else:
-            clarus_resized = clarus_img
-            print(f"   Images already same size, no resize needed")
+        # Step 1: Preprocess images for feature detection (green channel + CLAHE)
+        print("\n📊 Step 1: Preprocessing for feature detection...")
+        zeiss_gray = self._preprocess_for_registration(zeiss_img)
+        clarus_gray = self._preprocess_for_registration(clarus_img)
 
-        # Create overlay using weighted addition
-        overlay = cv2.addWeighted(zeiss_img, alpha, clarus_resized, alpha, 0)
+        # Step 2: Create masks to exclude black borders
+        print("🎭 Step 2: Creating masks to exclude borders...")
+        zeiss_mask = self._create_retinal_mask(zeiss_gray)
+        clarus_mask = self._create_retinal_mask(clarus_gray)
 
-        print(f"   Overlay output: {overlay.shape}")
+        # Step 3: Feature detection and matching
+        print("🔍 Step 3: Detecting and matching features...")
+        homography = self._compute_homography(zeiss_gray, clarus_gray,
+                                              zeiss_mask, clarus_mask)
+
+        if homography is None:
+            print("⚠️  Warning: Could not compute homography - falling back to simple center placement")
+            # Fallback: place Zeiss at center of Clarus
+            return self._create_centered_overlay(zeiss_img, clarus_img, alpha)
+
+        # Step 4: Warp Zeiss to Clarus coordinate system
+        print("🔄 Step 4: Warping Zeiss to align with Clarus...")
+        h, w = clarus_img.shape[:2]
+        warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h),
+                                          flags=cv2.INTER_CUBIC,
+                                          borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=(0, 0, 0))
+
+        # Step 5: Create overlay by blending
+        print("🎨 Step 5: Creating blended overlay...")
+        overlay = cv2.addWeighted(clarus_img, alpha, warped_zeiss, alpha, 0)
+
+        print(f"✅ Overlay complete: {overlay.shape}")
+        print(f"{'='*70}\n")
 
         return overlay
     
+    def _compute_homography(self, zeiss_gray: np.ndarray, clarus_gray: np.ndarray,
+                           zeiss_mask: np.ndarray, clarus_mask: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Compute homography matrix to register Zeiss to Clarus using feature matching.
+        Tries multiple feature detectors (SIFT, ORB, AKAZE) and returns best result.
+        """
+        methods = ['SIFT', 'ORB', 'AKAZE']
+        best_H = None
+        max_inliers = 0
+
+        for method in methods:
+            print(f"   Trying {method}...", end=" ")
+
+            try:
+                # Create detector
+                if method == 'SIFT':
+                    detector = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.03, edgeThreshold=10)
+                elif method == 'ORB':
+                    detector = cv2.ORB_create(nfeatures=10000)
+                elif method == 'AKAZE':
+                    detector = cv2.AKAZE_create()
+                else:
+                    continue
+
+                # Detect keypoints and descriptors
+                kp1, des1 = detector.detectAndCompute(zeiss_gray, mask=zeiss_mask)
+                kp2, des2 = detector.detectAndCompute(clarus_gray, mask=clarus_mask)
+
+                if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+                    print(f"Not enough features")
+                    continue
+
+                # Match features
+                if method == 'ORB':
+                    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                else:
+                    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+
+                matches = matcher.knnMatch(des1, des2, k=2)
+
+                # Apply ratio test (Lowe's ratio test)
+                good_matches = []
+                for pair in matches:
+                    if len(pair) == 2:
+                        m, n = pair
+                        if m.distance < 0.7 * n.distance:
+                            good_matches.append(m)
+
+                if len(good_matches) < 4:
+                    print(f"{len(good_matches)} matches (need ≥4)")
+                    continue
+
+                # Extract matching points
+                src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+                # Compute homography with RANSAC
+                H, inlier_mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+                if H is None:
+                    print(f"Homography computation failed")
+                    continue
+
+                inliers = int(inlier_mask.sum())
+                print(f"{len(good_matches)} matches, {inliers} inliers")
+
+                if inliers > max_inliers:
+                    max_inliers = inliers
+                    best_H = H
+                    best_method = method
+
+            except Exception as e:
+                print(f"Error: {e}")
+                continue
+
+        if best_H is not None:
+            print(f"   ✅ Best: {best_method} with {max_inliers} inliers")
+        else:
+            print(f"   ❌ No valid homography found")
+
+        return best_H
+
+    def _create_centered_overlay(self, zeiss_img: np.ndarray, clarus_img: np.ndarray,
+                                alpha: float = 0.5) -> np.ndarray:
+        """
+        Fallback overlay method: place Zeiss at center of Clarus canvas.
+        Used when feature-based registration fails.
+        """
+        h_c, w_c = clarus_img.shape[:2]
+        h_z, w_z = zeiss_img.shape[:2]
+
+        # Create output canvas (copy of Clarus)
+        overlay = clarus_img.copy()
+
+        # Calculate center position
+        y_offset = (h_c - h_z) // 2
+        x_offset = (w_c - w_z) // 2
+
+        # Make sure Zeiss fits within Clarus
+        if y_offset < 0 or x_offset < 0:
+            # Zeiss is larger than Clarus - resize it
+            scale = min(w_c / w_z, h_c / h_z) * 0.8
+            new_w = int(w_z * scale)
+            new_h = int(h_z * scale)
+            zeiss_resized = cv2.resize(zeiss_img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            y_offset = (h_c - new_h) // 2
+            x_offset = (w_c - new_w) // 2
+        else:
+            zeiss_resized = zeiss_img
+
+        h_z, w_z = zeiss_resized.shape[:2]
+
+        # Blend only in the region where Zeiss is placed
+        roi = overlay[y_offset:y_offset+h_z, x_offset:x_offset+w_z]
+        blended = cv2.addWeighted(roi, alpha, zeiss_resized, alpha, 0)
+        overlay[y_offset:y_offset+h_z, x_offset:x_offset+w_z] = blended
+
+        print(f"   ℹ️  Centered overlay: Zeiss placed at ({x_offset}, {y_offset})")
+
+        return overlay
+
     def get_all_patient_pairs(self) -> List[Dict[str, str]]:
         """Get all available Zeiss-Clarus pairs."""
         if self.df is None:
