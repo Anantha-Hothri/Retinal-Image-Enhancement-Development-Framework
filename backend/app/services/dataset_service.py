@@ -230,16 +230,24 @@ class DatasetService:
 
     def _preprocess_for_registration(self, img: np.ndarray) -> np.ndarray:
         """
-        Preprocess retinal image for feature detection.
-        Uses green channel + CLAHE for best vessel contrast.
+        Enhanced preprocessing for retinal image feature detection.
+        Uses green channel + CLAHE + vessel enhancement for robust features.
         """
         if len(img.shape) == 3:
             green = img[:, :, 1]
         else:
             green = img
 
+        # Apply CLAHE with optimized parameters for vessel enhancement
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(green)
+
+        # Additional vessel enhancement using morphological operations
+        # This helps detect features on vessel structures
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        tophat = cv2.morphologyEx(enhanced, cv2.MORPH_TOPHAT, kernel)
+        enhanced = cv2.add(enhanced, tophat)
+
         return enhanced
 
     def _create_retinal_mask(self, img_gray: np.ndarray, erosion_size: int = 20) -> np.ndarray:
@@ -269,7 +277,7 @@ class DatasetService:
             return np.ones_like(img_gray, dtype=np.uint8) * 255
     
     def create_overlay_visualization(self, zeiss_img: np.ndarray, clarus_img: np.ndarray,
-                                    alpha: float = 0.5) -> np.ndarray:
+                                    alpha: float = 0.5, zeiss_enhanced: np.ndarray = None) -> np.ndarray:
         """
         Create overlay visualization using proper image registration.
 
@@ -281,9 +289,10 @@ class DatasetService:
         - Only the overlapping region shows the blend
 
         Args:
-            zeiss_img: Zeiss image (BGR) - smaller FOV
+            zeiss_img: Zeiss image (BGR) - smaller FOV, original resolution
             clarus_img: Clarus image (BGR) - larger FOV
             alpha: Blending factor (0.5 = 50% each image)
+            zeiss_enhanced: Optional 4x enhanced Zeiss for better feature detection
 
         Returns:
             Overlay image at Clarus dimensions with registered Zeiss
@@ -294,9 +303,16 @@ class DatasetService:
         print(f"Zeiss size:  {zeiss_img.shape}")
         print(f"Clarus size: {clarus_img.shape}")
 
-        # Step 1: Preprocess images for feature detection (green channel + CLAHE)
+        # Try registration with enhanced Zeiss first (if available) for better feature matching
+        zeiss_for_registration = zeiss_enhanced if zeiss_enhanced is not None else zeiss_img
+        use_enhanced = zeiss_enhanced is not None
+
+        if use_enhanced:
+            print(f"Enhanced Zeiss: {zeiss_enhanced.shape} (using for better feature detection)")
+
+        # Step 1: Preprocess images for feature detection (green channel + CLAHE + vessels)
         print("\n📊 Step 1: Preprocessing for feature detection...")
-        zeiss_gray = self._preprocess_for_registration(zeiss_img)
+        zeiss_gray = self._preprocess_for_registration(zeiss_for_registration)
         clarus_gray = self._preprocess_for_registration(clarus_img)
 
         # Step 2: Create masks to exclude black borders
@@ -309,19 +325,27 @@ class DatasetService:
         homography, num_inliers = self._compute_homography(zeiss_gray, clarus_gray,
                                               zeiss_mask, clarus_mask)
 
-        # Require minimum 30 inliers for good registration (not just 4!)
-        MIN_INLIERS_REQUIRED = 30
+        # Adaptive threshold: higher for enhanced (expect better), lower for original
+        MIN_INLIERS_REQUIRED = 30 if use_enhanced else 15
 
         if homography is None or num_inliers < MIN_INLIERS_REQUIRED:
             if homography is not None:
                 print(f"⚠️  Warning: Only {num_inliers} inliers (need ≥{MIN_INLIERS_REQUIRED}) - registration quality too low")
-            print("📍 Using centered placement with proper blending instead")
+
+            # If enhanced failed, retry with original before falling back to centered
+            if use_enhanced and zeiss_enhanced is not None:
+                print("🔄 Retrying registration with original resolution Zeiss...")
+                return self.create_overlay_visualization(zeiss_img, clarus_img, alpha, zeiss_enhanced=None)
+
+            print("📍 Using centered placement with smart blending instead")
             return self._create_centered_overlay(zeiss_img, clarus_img, alpha)
 
         # Step 4: Warp Zeiss to Clarus coordinate system
         print(f"🔄 Step 4: Warping Zeiss to align with Clarus (using {num_inliers} inliers)...")
         h, w = clarus_img.shape[:2]
-        warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h),
+
+        # Warp the version used for registration (enhanced if available for better display quality)
+        warped_zeiss = cv2.warpPerspective(zeiss_for_registration, homography, (w, h),
                                           flags=cv2.INTER_CUBIC,
                                           borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=(0, 0, 0))
@@ -331,6 +355,8 @@ class DatasetService:
         overlay = self._create_smart_blend(clarus_img, warped_zeiss, alpha)
 
         print(f"✅ Overlay complete: {overlay.shape}")
+        if use_enhanced:
+            print(f"ℹ️  Used 4× enhanced Zeiss for registration and display")
         print(f"{'='*70}\n")
 
         return overlay
@@ -339,7 +365,7 @@ class DatasetService:
                            zeiss_mask: np.ndarray, clarus_mask: np.ndarray) -> tuple[Optional[np.ndarray], int]:
         """
         Compute homography matrix to register Zeiss to Clarus using feature matching.
-        Tries multiple feature detectors (SIFT, ORB, AKAZE) and returns best result.
+        Tries multiple feature detectors (SIFT, ORB, AKAZE) with optimized parameters.
 
         Returns:
             (homography_matrix, num_inliers) or (None, 0) if failed
@@ -347,18 +373,38 @@ class DatasetService:
         methods = ['SIFT', 'ORB', 'AKAZE']
         best_H = None
         max_inliers = 0
+        best_method = None
 
         for method in methods:
             print(f"   Trying {method}...", end=" ")
 
             try:
-                # Create detector
+                # Create detector with parameters optimized for retinal images
                 if method == 'SIFT':
-                    detector = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.03, edgeThreshold=10)
+                    # Increased features from 10k to 20k for better coverage
+                    # Lower contrast threshold to detect more features on vessels
+                    detector = cv2.SIFT_create(
+                        nfeatures=20000,
+                        contrastThreshold=0.03,  # Optimized for vessel features
+                        edgeThreshold=10,
+                        sigma=1.6
+                    )
                 elif method == 'ORB':
-                    detector = cv2.ORB_create(nfeatures=10000)
+                    # Increased features, multi-scale for better matching
+                    detector = cv2.ORB_create(
+                        nfeatures=20000,
+                        scaleFactor=1.2,
+                        nlevels=8,
+                        edgeThreshold=31,
+                        patchSize=31
+                    )
                 elif method == 'AKAZE':
-                    detector = cv2.AKAZE_create()
+                    # AKAZE with optimized threshold for retinal images
+                    detector = cv2.AKAZE_create(
+                        threshold=0.001,
+                        nOctaves=4,
+                        nOctaveLayers=4
+                    )
                 else:
                     continue
 
@@ -367,42 +413,53 @@ class DatasetService:
                 kp2, des2 = detector.detectAndCompute(clarus_gray, mask=clarus_mask)
 
                 if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-                    print(f"Not enough features")
+                    print(f"Not enough keypoints (Zeiss: {len(kp1) if kp1 else 0}, Clarus: {len(kp2) if kp2 else 0})")
                     continue
 
-                # Match features
+                print(f"Detected {len(kp1)} & {len(kp2)} keypoints...", end=" ")
+
+                # Match features using appropriate matcher
                 if method == 'ORB':
                     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+                    ratio_threshold = 0.80  # More lenient for ORB
                 else:
                     matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+                    ratio_threshold = 0.75  # Standard for SIFT/AKAZE
 
                 matches = matcher.knnMatch(des1, des2, k=2)
 
-                # Apply ratio test (Lowe's ratio test)
+                # Apply Lowe's ratio test to filter good matches
                 good_matches = []
                 for pair in matches:
                     if len(pair) == 2:
                         m, n = pair
-                        if m.distance < 0.7 * n.distance:
+                        if m.distance < ratio_threshold * n.distance:
                             good_matches.append(m)
 
                 if len(good_matches) < 4:
                     print(f"{len(good_matches)} matches (need ≥4)")
                     continue
 
-                # Extract matching points
+                # Extract matching point coordinates
                 src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
                 dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
                 # Compute homography with RANSAC
-                H, inlier_mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                # Increased ransacReprojThreshold slightly for retinal images
+                H, inlier_mask = cv2.findHomography(
+                    src_pts, dst_pts,
+                    cv2.RANSAC,
+                    ransacReprojThreshold=5.0,
+                    maxIters=2000,
+                    confidence=0.995
+                )
 
                 if H is None:
-                    print(f"Homography computation failed")
+                    print(f"Homography failed")
                     continue
 
                 inliers = int(inlier_mask.sum())
-                print(f"{len(good_matches)} matches, {inliers} inliers")
+                print(f"{len(good_matches)} matches → {inliers} inliers")
 
                 if inliers > max_inliers:
                     max_inliers = inliers

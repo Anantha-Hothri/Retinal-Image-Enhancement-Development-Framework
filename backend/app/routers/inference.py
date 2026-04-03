@@ -479,6 +479,15 @@ async def get_ground_truth_comparison(request_id: str):
         if zeiss_original is None or clarus_ground_truth is None or enhanced_result is None:
             raise HTTPException(status_code=500, detail="Failed to load one or more images")
 
+        # Try to load 4x enhanced version for better registration
+        # This has better resolution and quality for feature detection
+        enhanced_4x_path = temp_dir / "04_enhanced.png"
+        zeiss_enhanced_4x = None
+        if enhanced_4x_path.exists():
+            zeiss_enhanced_4x = cv2.imread(str(enhanced_4x_path))
+            if zeiss_enhanced_4x is not None:
+                print(f"✓ Loaded 4× enhanced Zeiss for improved registration: {zeiss_enhanced_4x.shape}")
+
         # Create output directory for comparison
         comparison_dir = temp_dir / "ground_truth_comparison"
         comparison_dir.mkdir(exist_ok=True)
@@ -488,10 +497,12 @@ async def get_ground_truth_comparison(request_id: str):
         cv2.imwrite(str(clarus_copy_path), clarus_ground_truth)
 
         # Create overlay visualization (Zeiss overlaid on Clarus)
+        # Use enhanced 4x version if available for better feature matching
         overlay = dataset_service.create_overlay_visualization(
             zeiss_original,
             clarus_ground_truth,
-            alpha=0.5
+            alpha=0.5,
+            zeiss_enhanced=zeiss_enhanced_4x
         )
         overlay_path = comparison_dir / "overlay_zeiss_on_clarus.png"
         cv2.imwrite(str(overlay_path), overlay)
