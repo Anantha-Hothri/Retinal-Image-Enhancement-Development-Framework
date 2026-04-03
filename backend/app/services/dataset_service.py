@@ -341,19 +341,19 @@ class DatasetService:
             return self._create_centered_overlay(zeiss_img, clarus_img, alpha)
 
         # Step 4: Warp Zeiss to Clarus coordinate system
+        # Using EXACT warping method from fixed_trial4_updated.py (line 637)
         print(f"🔄 Step 4: Warping Zeiss to align with Clarus (using {num_inliers} inliers)...")
         h, w = clarus_img.shape[:2]
 
         # IMPORTANT: Always warp and display the ORIGINAL Zeiss, not the enhanced
         # We only used enhanced for feature detection, but overlay shows original input
-        warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h),
-                                          flags=cv2.INTER_CUBIC,
-                                          borderMode=cv2.BORDER_CONSTANT,
-                                          borderValue=(0, 0, 0))
+        # Match trial4: Simple INTER_CUBIC, no explicit border mode
+        warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h), flags=cv2.INTER_CUBIC)
 
-        # Step 5: Create smart overlay that preserves Clarus where Zeiss is black
-        print("🎨 Step 5: Creating smart blended overlay...")
-        overlay = self._create_smart_blend(clarus_img, warped_zeiss, alpha)
+        # Step 5: Create overlay using EXACT trial4 method (line 639)
+        # Simple 50/50 alpha blend - no smart blend that might cause darkening
+        print("🎨 Step 5: Creating blended overlay (trial4 method)...")
+        overlay = cv2.addWeighted(clarus_img, alpha, warped_zeiss, alpha, 0)
 
         print(f"✅ Overlay complete: {overlay.shape}")
         if use_enhanced:
