@@ -306,25 +306,29 @@ class DatasetService:
 
         # Step 3: Feature detection and matching
         print("🔍 Step 3: Detecting and matching features...")
-        homography = self._compute_homography(zeiss_gray, clarus_gray,
+        homography, num_inliers = self._compute_homography(zeiss_gray, clarus_gray,
                                               zeiss_mask, clarus_mask)
 
-        if homography is None:
-            print("⚠️  Warning: Could not compute homography - falling back to simple center placement")
-            # Fallback: place Zeiss at center of Clarus
+        # Require minimum 30 inliers for good registration (not just 4!)
+        MIN_INLIERS_REQUIRED = 30
+
+        if homography is None or num_inliers < MIN_INLIERS_REQUIRED:
+            if homography is not None:
+                print(f"⚠️  Warning: Only {num_inliers} inliers (need ≥{MIN_INLIERS_REQUIRED}) - registration quality too low")
+            print("📍 Using centered placement with proper blending instead")
             return self._create_centered_overlay(zeiss_img, clarus_img, alpha)
 
         # Step 4: Warp Zeiss to Clarus coordinate system
-        print("🔄 Step 4: Warping Zeiss to align with Clarus...")
+        print(f"🔄 Step 4: Warping Zeiss to align with Clarus (using {num_inliers} inliers)...")
         h, w = clarus_img.shape[:2]
         warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h),
                                           flags=cv2.INTER_CUBIC,
                                           borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=(0, 0, 0))
 
-        # Step 5: Create overlay by blending
-        print("🎨 Step 5: Creating blended overlay...")
-        overlay = cv2.addWeighted(clarus_img, alpha, warped_zeiss, alpha, 0)
+        # Step 5: Create smart overlay that preserves Clarus where Zeiss is black
+        print("🎨 Step 5: Creating smart blended overlay...")
+        overlay = self._create_smart_blend(clarus_img, warped_zeiss, alpha)
 
         print(f"✅ Overlay complete: {overlay.shape}")
         print(f"{'='*70}\n")
@@ -332,10 +336,13 @@ class DatasetService:
         return overlay
     
     def _compute_homography(self, zeiss_gray: np.ndarray, clarus_gray: np.ndarray,
-                           zeiss_mask: np.ndarray, clarus_mask: np.ndarray) -> Optional[np.ndarray]:
+                           zeiss_mask: np.ndarray, clarus_mask: np.ndarray) -> tuple[Optional[np.ndarray], int]:
         """
         Compute homography matrix to register Zeiss to Clarus using feature matching.
         Tries multiple feature detectors (SIFT, ORB, AKAZE) and returns best result.
+
+        Returns:
+            (homography_matrix, num_inliers) or (None, 0) if failed
         """
         methods = ['SIFT', 'ORB', 'AKAZE']
         best_H = None
@@ -411,19 +418,46 @@ class DatasetService:
         else:
             print(f"   ❌ No valid homography found")
 
-        return best_H
+        return best_H, max_inliers
+
+    def _create_smart_blend(self, clarus_img: np.ndarray, warped_zeiss: np.ndarray,
+                           alpha: float = 0.5) -> np.ndarray:
+        """
+        Create smart blend that only blends where Zeiss has valid data.
+        Preserves Clarus in areas where Zeiss is black (warped border regions).
+        """
+        # Create mask for valid Zeiss regions (non-black areas)
+        zeiss_gray = cv2.cvtColor(warped_zeiss, cv2.COLOR_BGR2GRAY)
+        _, zeiss_valid_mask = cv2.threshold(zeiss_gray, 10, 255, cv2.THRESH_BINARY)
+
+        # Convert mask to 3-channel for blending
+        zeiss_valid_mask_3ch = cv2.merge([zeiss_valid_mask, zeiss_valid_mask, zeiss_valid_mask]) / 255.0
+
+        # Blend only where Zeiss is valid
+        # In valid regions: blend both images
+        # In invalid regions: use only Clarus
+        overlay = clarus_img.copy().astype(np.float32)
+        warped_zeiss_float = warped_zeiss.astype(np.float32)
+        clarus_float = clarus_img.astype(np.float32)
+
+        # Where Zeiss is valid: weighted blend
+        # Where Zeiss is black: 100% Clarus
+        overlay = (zeiss_valid_mask_3ch * (alpha * clarus_float + alpha * warped_zeiss_float) +
+                  (1 - zeiss_valid_mask_3ch) * clarus_float)
+
+        return np.clip(overlay, 0, 255).astype(np.uint8)
 
     def _create_centered_overlay(self, zeiss_img: np.ndarray, clarus_img: np.ndarray,
                                 alpha: float = 0.5) -> np.ndarray:
         """
-        Fallback overlay method: place Zeiss at center of Clarus canvas.
-        Used when feature-based registration fails.
+        Improved fallback overlay: place Zeiss at center with smart blending.
+        Only blends where Zeiss has valid (non-black) data.
         """
         h_c, w_c = clarus_img.shape[:2]
         h_z, w_z = zeiss_img.shape[:2]
 
         # Create output canvas (copy of Clarus)
-        overlay = clarus_img.copy()
+        overlay = clarus_img.copy().astype(np.float32)
 
         # Calculate center position
         y_offset = (h_c - h_z) // 2
@@ -443,14 +477,26 @@ class DatasetService:
 
         h_z, w_z = zeiss_resized.shape[:2]
 
-        # Blend only in the region where Zeiss is placed
+        # Create mask for valid Zeiss regions (non-black areas)
+        zeiss_gray = cv2.cvtColor(zeiss_resized, cv2.COLOR_BGR2GRAY)
+        _, zeiss_mask = cv2.threshold(zeiss_gray, 10, 255, cv2.THRESH_BINARY)
+        zeiss_mask_3ch = cv2.merge([zeiss_mask, zeiss_mask, zeiss_mask]) / 255.0
+
+        # Extract ROI from Clarus
         roi = overlay[y_offset:y_offset+h_z, x_offset:x_offset+w_z]
-        blended = cv2.addWeighted(roi, alpha, zeiss_resized, alpha, 0)
-        overlay[y_offset:y_offset+h_z, x_offset:x_offset+w_z] = blended
+        zeiss_float = zeiss_resized.astype(np.float32)
 
-        print(f"   ℹ️  Centered overlay: Zeiss placed at ({x_offset}, {y_offset})")
+        # Smart blend: only blend where Zeiss is valid
+        blended_roi = (zeiss_mask_3ch * (alpha * roi + alpha * zeiss_float) +
+                      (1 - zeiss_mask_3ch) * roi)
 
-        return overlay
+        overlay[y_offset:y_offset+h_z, x_offset:x_offset+w_z] = blended_roi
+
+        result = np.clip(overlay, 0, 255).astype(np.uint8)
+
+        print(f"   ℹ️  Centered overlay: Zeiss ({h_z}×{w_z}) placed at ({x_offset}, {y_offset}) within Clarus ({h_c}×{w_c})")
+
+        return result
 
     def get_all_patient_pairs(self) -> List[Dict[str, str]]:
         """Get all available Zeiss-Clarus pairs."""
