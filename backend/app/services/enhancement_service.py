@@ -259,83 +259,25 @@ class EnhancementService:
         return results
 
     def _extract_vessel_map(self, img: np.ndarray) -> np.ndarray:
-        """
-        Extract vessel map using state-of-the-art retinal vessel segmentation.
-        Uses matched filtering + morphological operations for precise vessel-only detection.
-        """
-        # Use green channel (best contrast for vessels)
+        """Extract vessel map using classical methods."""
+        # Use green channel
         if len(img.shape) == 3:
             gray = img[:, :, 1]
         else:
             gray = img
 
-        # 1. Normalize and enhance using CLAHE (moderate)
+        # CLAHE
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # 2. Apply matched filter for vessel-like structures (Frangi vesselness)
-        # This specifically detects tubular structures (vessels) and rejects blob-like noise
-        # Using multi-scale approach for different vessel widths
-        vessel_enhanced = np.zeros_like(enhanced, dtype=np.float32)
+        # Black-hat morphology
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        blackhat = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, kernel)
 
-        # Apply filters at multiple scales for thin and thick vessels
-        for sigma in [1.0, 1.5, 2.0, 2.5]:
-            # Gaussian filter
-            filtered = cv2.GaussianBlur(enhanced, (0, 0), sigma)
+        # Threshold
+        _, vessel_map = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-            # Compute gradients
-            sobelx = cv2.Sobel(filtered, cv2.CV_64F, 1, 0, ksize=3)
-            sobely = cv2.Sobel(filtered, cv2.CV_64F, 0, 1, ksize=3)
-
-            # Gradient magnitude
-            mag = np.sqrt(sobelx**2 + sobely**2)
-            vessel_enhanced = np.maximum(vessel_enhanced, mag.astype(np.float32))
-
-        # Normalize vessel response
-        vessel_enhanced = cv2.normalize(vessel_enhanced, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-        # 3. Invert (vessels are dark on bright background in green channel)
-        vessel_enhanced = 255 - vessel_enhanced
-
-        # 4. Apply strong threshold to keep only confident vessels
-        # Use Otsu's method on the vessel-enhanced image
-        _, vessel_binary = cv2.threshold(vessel_enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # 5. Morphological cleanup - remove small noise while preserving vessel connectivity
-        # Remove tiny noise
-        kernel_noise = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        vessel_binary = cv2.morphologyEx(vessel_binary, cv2.MORPH_OPEN, kernel_noise, iterations=1)
-
-        # Connect nearby vessel segments
-        kernel_connect = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        vessel_binary = cv2.morphologyEx(vessel_binary, cv2.MORPH_CLOSE, kernel_connect, iterations=1)
-
-        # 6. Remove components that are too small or too large (likely non-vessel)
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(vessel_binary, connectivity=8)
-
-        filtered_vessel_map = np.zeros_like(vessel_binary)
-        min_area = 30   # Minimum vessel segment size
-        max_area = enhanced.size * 0.1  # Max 10% of image (reject large blobs)
-
-        kept_count = 0
-        for i in range(1, num_labels):  # Skip background (label 0)
-            area = stats[i, cv2.CC_STAT_AREA]
-
-            # Keep only components in valid size range
-            if min_area <= area <= max_area:
-                # Also check aspect ratio (vessels are elongated)
-                width = stats[i, cv2.CC_STAT_WIDTH]
-                height = stats[i, cv2.CC_STAT_HEIGHT]
-                aspect_ratio = max(width, height) / (min(width, height) + 1)
-
-                # Keep if elongated (aspect ratio > 1.5) OR reasonably sized
-                if aspect_ratio > 1.5 or area > 100:
-                    filtered_vessel_map[labels == i] = 255
-                    kept_count += 1
-
-        print(f"✓ Vessel extraction: {num_labels-1} components found, kept {kept_count} vessel segments (removed {num_labels-1-kept_count} non-vessel regions)")
-
-        return filtered_vessel_map
+        return vessel_map
 
     async def _apply_model_enhancement(self, img: np.ndarray, vessel_map: np.ndarray) -> np.ndarray:
         """Apply deep learning model for enhancement."""
