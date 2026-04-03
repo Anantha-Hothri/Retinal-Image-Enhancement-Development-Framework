@@ -6,6 +6,7 @@ import ComparisonViewer from '../components/ComparisonViewer';
 import MetricsDashboard from '../components/MetricsDashboard';
 import ClarusUpload from '../components/ClarusUpload';
 import ImageControls, { ImageAdjustments } from '../components/ImageControls';
+import GroundTruthComparison from '../components/GroundTruthComparison';
 
 export default function Home() {
   const [processing, setProcessing] = useState(false);
@@ -20,6 +21,7 @@ export default function Home() {
     zoom: 100,
     rotation: 0,
   });
+  const [activeTab, setActiveTab] = useState<'processing' | 'groundtruth'>('processing');
 
   const handleImageControlsChange = (adjustments: ImageAdjustments) => {
     setImageAdjustments(adjustments);
@@ -144,51 +146,87 @@ export default function Home() {
         {/* Results Section */}
         {results && !processing && (
           <div className="space-y-8">
-            {/* Processing Steps */}
-            <ProcessingSteps
-              steps={results.steps}
-              requestId={results.request_id}
-            />
-
-            {/* Metrics Dashboard */}
-            <MetricsDashboard metrics={results.metrics} />
-
-            {/* Advanced Comparison Viewer */}
-            <ComparisonViewer
-              originalUrl={`http://localhost:8000/api/result/${results.request_id}/input`}
-              enhancedUrl={`http://localhost:8000/api/result/${results.request_id}/final`}
-              imageAdjustments={imageAdjustments}
-            />
-
-            {/* Image Controls */}
-            <ImageControls onControlsChange={handleImageControlsChange} />
-
-            {/* Optional Clarus Upload and Comparison */}
-            {!clarusImage && (
-              <ClarusUpload
-                onUpload={handleClarusUpload}
-                disabled={comparingClarus}
-              />
-            )}
-
-            {comparingClarus && (
-              <div className="text-center bg-white rounded-lg shadow-lg p-6">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
-                <p className="mt-2 text-gray-600">Comparing with Clarus ground truth...</p>
-              </div>
-            )}
-
-            {/* Clarus Comparison Metrics */}
-            {clarusImage && clarusMetrics && (
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <h2 className="text-2xl font-bold text-gray-900 mb-4">
+            {/* Tab Navigation */}
+            <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+              <div className="flex border-b border-gray-200">
+                <button
+                  onClick={() => setActiveTab('processing')}
+                  className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
+                    activeTab === 'processing'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  Processing & Enhancement
+                </button>
+                <button
+                  onClick={() => setActiveTab('groundtruth')}
+                  className={`flex-1 px-6 py-4 text-sm font-medium transition-colors ${
+                    activeTab === 'groundtruth'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
                   Ground Truth Comparison
-                </h2>
-                <p className="text-sm text-gray-600 mb-6">
-                  Comparison between enhanced result and Clarus ground truth image
-                </p>
-                <MetricsDashboard metrics={clarusMetrics} />
+                </button>
               </div>
+            </div>
+
+            {/* Tab Content */}
+            {activeTab === 'processing' && (
+              <div className="space-y-8">
+                {/* Processing Steps */}
+                <ProcessingSteps
+                  steps={results.steps}
+                  requestId={results.request_id}
+                />
+
+                {/* Metrics Dashboard */}
+                <MetricsDashboard metrics={results.metrics} />
+
+                {/* Advanced Comparison Viewer with 2x brightness for enhanced/final */}
+                <ComparisonViewer
+                  originalUrl={`http://localhost:8000/api/result/${results.request_id}/input`}
+                  enhancedUrl={`http://localhost:8000/api/result/${results.request_id}/final?brightness=2.0`}
+                  imageAdjustments={imageAdjustments}
+                />
+
+                {/* Image Controls */}
+                <ImageControls onControlsChange={handleImageControlsChange} />
+
+                {/* Optional Clarus Upload and Comparison */}
+                {!clarusImage && (
+                  <ClarusUpload
+                    onUpload={handleClarusUpload}
+                    disabled={comparingClarus}
+                  />
+                )}
+
+                {comparingClarus && (
+                  <div className="text-center bg-white rounded-lg shadow-lg p-6">
+                    <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                    <p className="mt-2 text-gray-600">Comparing with Clarus ground truth...</p>
+                  </div>
+                )}
+
+                {/* Clarus Comparison Metrics */}
+                {clarusImage && clarusMetrics && (
+                  <div className="bg-white rounded-lg shadow-lg p-6">
+                    <h2 className="text-2xl font-bold text-gray-900 mb-4">
+                      Ground Truth Comparison
+                    </h2>
+                    <p className="text-sm text-gray-600 mb-6">
+                      Comparison between enhanced result and Clarus ground truth image
+                    </p>
+                    <MetricsDashboard metrics={clarusMetrics} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Ground Truth Tab */}
+            {activeTab === 'groundtruth' && (
+              <GroundTruthComparison requestId={results.request_id} />
             )}
 
             {/* Reset Button */}
@@ -199,6 +237,7 @@ export default function Home() {
                   setClarusImage(null);
                   setClarusMetrics(null);
                   setError(null);
+                  setActiveTab('processing');
                 }}
                 className="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition-colors"
               >

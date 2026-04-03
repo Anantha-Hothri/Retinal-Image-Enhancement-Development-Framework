@@ -20,6 +20,7 @@ sys.path.insert(0, str(project_root))
 from backend.app.services.enhancement_service import EnhancementService
 from backend.app.services.metrics_service import MetricsService
 from backend.app.services.registration_service import RegistrationService
+from backend.app.services.dataset_service import DatasetService
 
 router = APIRouter()
 
@@ -27,6 +28,7 @@ router = APIRouter()
 enhancement_service = None
 metrics_service = MetricsService()
 registration_service = RegistrationService()
+dataset_service = DatasetService()
 
 
 def get_enhancement_service():
@@ -97,11 +99,18 @@ async def process_image(
 
 
 @router.get("/result/{request_id}/{step}")
-async def get_step_image(request_id: str, step: str):
-    """Get image for a specific processing step."""
+async def get_step_image(request_id: str, step: str, brightness: float = 1.0):
+    """
+    Get image for a specific processing step.
+
+    Args:
+        request_id: Request identifier
+        step: Processing step name
+        brightness: Brightness multiplier for display (default: 1.0, use 2.0 for 200% brightness)
+    """
     try:
         temp_dir = Path("backend/temp") / request_id
-        
+
         # Map step names to file paths
         step_files = {
             "input": "input.jpg",
@@ -111,17 +120,34 @@ async def get_step_image(request_id: str, step: str):
             "enhanced": "04_enhanced.png",
             "final": "05_final.png"
         }
-        
+
         if step not in step_files:
             raise HTTPException(status_code=400, detail=f"Invalid step: {step}")
-        
+
         image_path = temp_dir / step_files[step]
-        
+
         if not image_path.exists():
             raise HTTPException(status_code=404, detail=f"Image not found for step: {step}")
-        
+
+        # For 'enhanced' and 'final' steps, apply brightness adjustment for display
+        if step in ["enhanced", "final"] and brightness != 1.0:
+            # Load image
+            img = cv2.imread(str(image_path))
+            if img is None:
+                raise HTTPException(status_code=500, detail="Failed to load image")
+
+            # Apply brightness multiplier (for display only, not saved)
+            img_brightened = np.clip(img.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
+
+            # Create temporary brightened image
+            brightened_path = temp_dir / f"{step}_display_bright{int(brightness*100)}.png"
+            cv2.imwrite(str(brightened_path), img_brightened)
+
+            print(f"✓ Applied {brightness}x brightness to {step} for display")
+            return FileResponse(brightened_path, media_type="image/png")
+
         return FileResponse(image_path, media_type="image/png")
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving image: {str(e)}")
 
@@ -406,3 +432,164 @@ async def compare_images(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Comparison error: {str(e)}")
 
+
+
+@router.post("/ground-truth-comparison/{request_id}")
+async def get_ground_truth_comparison(request_id: str):
+    """
+    Automatically find and compare enhanced result with ground truth Clarus image.
+
+    Uses the Excel dataset mapping to find the corresponding Clarus image for the
+    uploaded Zeiss image, then creates a 3-way comparison with overlay visualization.
+
+    Args:
+        request_id: Request ID from the enhancement process
+
+    Returns:
+        Comparison data including paths, metrics, and overlay visualization
+    """
+    try:
+        temp_dir = Path("backend/temp") / request_id
+
+        # Get the original input image name
+        input_path = temp_dir / "input.jpg"
+        if not input_path.exists():
+            raise HTTPException(status_code=404, detail="Original input not found")
+
+        # Find corresponding Clarus ground truth using dataset service
+        pair = dataset_service.find_clarus_pair(str(input_path))
+
+        if pair is None:
+            return JSONResponse(content={
+                "success": False,
+                "message": "No ground truth Clarus image found for this Zeiss image",
+                "has_ground_truth": False
+            })
+
+        # Load images
+        zeiss_original = cv2.imread(str(input_path))
+        clarus_ground_truth = cv2.imread(pair["clarus_path"])
+        enhanced_path = temp_dir / "05_final.png"
+
+        if not enhanced_path.exists():
+            raise HTTPException(status_code=404, detail="Enhanced result not found")
+
+        enhanced_result = cv2.imread(str(enhanced_path))
+
+        if zeiss_original is None or clarus_ground_truth is None or enhanced_result is None:
+            raise HTTPException(status_code=500, detail="Failed to load one or more images")
+
+        # Create output directory for comparison
+        comparison_dir = temp_dir / "ground_truth_comparison"
+        comparison_dir.mkdir(exist_ok=True)
+
+        # Save Clarus ground truth for frontend access
+        clarus_copy_path = comparison_dir / "clarus_ground_truth.png"
+        cv2.imwrite(str(clarus_copy_path), clarus_ground_truth)
+
+        # Create overlay visualization (Zeiss overlaid on Clarus)
+        overlay = dataset_service.create_overlay_visualization(
+            zeiss_original,
+            clarus_ground_truth,
+            alpha=0.5
+        )
+        overlay_path = comparison_dir / "overlay_zeiss_on_clarus.png"
+        cv2.imwrite(str(overlay_path), overlay)
+
+        # Calculate metrics: Enhanced vs Ground Truth
+        # Resize enhanced to match ground truth for fair comparison
+        if enhanced_result.shape != clarus_ground_truth.shape:
+            enhanced_resized = cv2.resize(
+                enhanced_result,
+                (clarus_ground_truth.shape[1], clarus_ground_truth.shape[0]),
+                interpolation=cv2.INTER_CUBIC
+            )
+        else:
+            enhanced_resized = enhanced_result
+
+        # Calculate comprehensive metrics
+        try:
+            psnr = MetricsService.calculate_psnr(enhanced_resized, clarus_ground_truth)
+        except Exception as e:
+            print(f"⚠️ PSNR calculation failed: {e}")
+            psnr = 0.0
+
+        try:
+            ssim = MetricsService.calculate_ssim(enhanced_resized, clarus_ground_truth)
+        except Exception as e:
+            print(f"⚠️ SSIM calculation failed: {e}")
+            ssim = 0.0
+
+        try:
+            vessel_recovery = MetricsService.calculate_vessel_recovery(enhanced_resized, clarus_ground_truth)
+        except Exception as e:
+            print(f"⚠️ Vessel Recovery calculation failed: {e}")
+            vessel_recovery = 0.0
+
+        metrics = {
+            "psnr": float(psnr),
+            "ssim": float(ssim),
+            "vessel_recovery": float(vessel_recovery),
+            "sharpness_zeiss": float(MetricsService.calculate_sharpness(zeiss_original)),
+            "sharpness_enhanced": float(MetricsService.calculate_sharpness(enhanced_result)),
+            "sharpness_clarus": float(MetricsService.calculate_sharpness(clarus_ground_truth)),
+            "contrast_zeiss": float(MetricsService.calculate_contrast(zeiss_original)),
+            "contrast_enhanced": float(MetricsService.calculate_contrast(enhanced_result)),
+            "contrast_clarus": float(MetricsService.calculate_contrast(clarus_ground_truth)),
+        }
+
+        print(f"✓ Ground truth comparison: Patient {pair['patient_id']}, PSNR={psnr:.2f}dB, SSIM={ssim:.4f}")
+
+        return JSONResponse(content={
+            "success": True,
+            "has_ground_truth": True,
+            "patient_id": pair["patient_id"],
+            "metrics": metrics,
+            "images": {
+                "zeiss_original": "input",  # Use existing endpoint
+                "enhanced_result": "final",  # Use existing endpoint
+                "clarus_ground_truth": f"ground_truth_comparison/clarus_ground_truth.png",
+                "overlay": f"ground_truth_comparison/overlay_zeiss_on_clarus.png"
+            },
+            "message": "Ground truth comparison completed successfully"
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Ground truth comparison error: {str(e)}")
+
+
+@router.get("/ground-truth-image/{request_id}/{image_type}")
+async def get_ground_truth_image(request_id: str, image_type: str):
+    """
+    Get ground truth comparison images.
+
+    Args:
+        request_id: Request ID
+        image_type: 'clarus_ground_truth' or 'overlay'
+    """
+    try:
+        temp_dir = Path("backend/temp") / request_id / "ground_truth_comparison"
+
+        image_files = {
+            "clarus_ground_truth": "clarus_ground_truth.png",
+            "overlay": "overlay_zeiss_on_clarus.png"
+        }
+
+        if image_type not in image_files:
+            raise HTTPException(status_code=400, detail=f"Invalid image type: {image_type}")
+
+        image_path = temp_dir / image_files[image_type]
+
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail=f"Image not found: {image_type}")
+
+        return FileResponse(image_path, media_type="image/png")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving ground truth image: {str(e)}")

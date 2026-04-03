@@ -229,25 +229,60 @@ class EnhancementService:
         return results
 
     def _extract_vessel_map(self, img: np.ndarray) -> np.ndarray:
-        """Extract vessel map using classical methods."""
+        """
+        Extract vessel map using improved classical methods.
+        Reduces over-segmentation with multiple filters and morphological operations.
+        """
         # Use green channel
         if len(img.shape) == 3:
             gray = img[:, :, 1]
         else:
             gray = img
 
-        # CLAHE
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # CLAHE with reduced clip limit to avoid over-enhancement
+        clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # Black-hat morphology
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        # Gaussian blur to reduce noise before vessel detection
+        enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
+        # Black-hat morphology with smaller kernel
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (12, 12))
         blackhat = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, kernel)
 
-        # Threshold
-        _, vessel_map = cv2.threshold(blackhat, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Use adaptive threshold instead of Otsu for better vessel detection
+        # This reduces background noise being classified as vessels
+        vessel_map = cv2.adaptiveThreshold(
+            blackhat,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            blockSize=15,
+            C=-2
+        )
 
-        return vessel_map
+        # Morphological operations to clean up the vessel map
+        # Remove small isolated noise (opening)
+        kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        vessel_map = cv2.morphologyEx(vessel_map, cv2.MORPH_OPEN, kernel_clean)
+
+        # Close small gaps in vessels
+        kernel_connect = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        vessel_map = cv2.morphologyEx(vessel_map, cv2.MORPH_CLOSE, kernel_connect)
+
+        # Remove very small connected components (likely noise)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(vessel_map, connectivity=8)
+
+        # Filter out small components (< 50 pixels)
+        min_size = 50
+        filtered_vessel_map = np.zeros_like(vessel_map)
+        for i in range(1, num_labels):  # Skip background (label 0)
+            if stats[i, cv2.CC_STAT_AREA] >= min_size:
+                filtered_vessel_map[labels == i] = 255
+
+        print(f"✓ Vessel extraction: {num_labels-1} components found, kept {np.unique(labels[filtered_vessel_map > 0]).size} after filtering")
+
+        return filtered_vessel_map
 
     async def _apply_model_enhancement(self, img: np.ndarray, vessel_map: np.ndarray) -> np.ndarray:
         """Apply deep learning model for enhancement."""
