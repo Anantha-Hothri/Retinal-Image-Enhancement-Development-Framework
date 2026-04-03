@@ -281,18 +281,21 @@ class DatasetService:
         """
         Create overlay visualization using proper image registration.
 
-        This performs feature-based registration to align the small Zeiss FOV
-        with the corresponding region in the larger Clarus image, then creates
-        an overlay where:
+        This performs feature-based registration to align the Zeiss FOV (typically
+        the enhanced output from the DL pipeline) with the corresponding region in
+        the larger Clarus ground truth image, then creates an overlay where:
         - The Zeiss image is warped to align with Clarus coordinates
         - The output is at full Clarus resolution
         - Only the overlapping region shows the blend
 
+        Typical usage: Compare enhanced output quality vs ground truth reference
+
         Args:
-            zeiss_img: Zeiss image (BGR) - smaller FOV, original resolution
-            clarus_img: Clarus image (BGR) - larger FOV
+            zeiss_img: Zeiss image (BGR) - Can be original input OR enhanced output
+            clarus_img: Clarus image (BGR) - Ground truth reference (larger FOV)
             alpha: Blending factor (0.5 = 50% each image)
-            zeiss_enhanced: Optional 4x enhanced Zeiss for better feature detection
+            zeiss_enhanced: Optional 4× enhanced version for better feature detection
+                          (used internally for keypoint detection, not displayed)
 
         Returns:
             Overlay image at Clarus dimensions with registered Zeiss

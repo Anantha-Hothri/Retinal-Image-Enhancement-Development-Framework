@@ -496,15 +496,17 @@ async def get_ground_truth_comparison(request_id: str):
         clarus_copy_path = comparison_dir / "clarus_ground_truth.png"
         cv2.imwrite(str(clarus_copy_path), clarus_ground_truth)
 
-        # Create overlay visualization (Zeiss overlaid on Clarus)
-        # Use enhanced 4x version if available for better feature matching
+        # Create overlay visualization: Enhanced Output + Clarus Ground Truth
+        # This shows how well the enhancement pipeline's output compares to reference quality
+        # Note: We use 4× enhanced (04_enhanced.png) for feature detection,
+        #       but display the final enhanced output (05_final.png) in the overlay
         overlay = dataset_service.create_overlay_visualization(
-            zeiss_original,
+            enhanced_result,  # Display the ENHANCED output, not original input
             clarus_ground_truth,
             alpha=0.5,
-            zeiss_enhanced=zeiss_enhanced_4x
+            zeiss_enhanced=zeiss_enhanced_4x  # Use for feature detection only
         )
-        overlay_path = comparison_dir / "overlay_zeiss_on_clarus.png"
+        overlay_path = comparison_dir / "overlay_enhanced_on_clarus.png"
         cv2.imwrite(str(overlay_path), overlay)
 
         # Calculate metrics: Enhanced vs Ground Truth
