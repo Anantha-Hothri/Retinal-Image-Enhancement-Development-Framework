@@ -344,8 +344,9 @@ class DatasetService:
         print(f"🔄 Step 4: Warping Zeiss to align with Clarus (using {num_inliers} inliers)...")
         h, w = clarus_img.shape[:2]
 
-        # Warp the version used for registration (enhanced if available for better display quality)
-        warped_zeiss = cv2.warpPerspective(zeiss_for_registration, homography, (w, h),
+        # IMPORTANT: Always warp and display the ORIGINAL Zeiss, not the enhanced
+        # We only used enhanced for feature detection, but overlay shows original input
+        warped_zeiss = cv2.warpPerspective(zeiss_img, homography, (w, h),
                                           flags=cv2.INTER_CUBIC,
                                           borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=(0, 0, 0))
@@ -356,7 +357,7 @@ class DatasetService:
 
         print(f"✅ Overlay complete: {overlay.shape}")
         if use_enhanced:
-            print(f"ℹ️  Used 4× enhanced Zeiss for registration and display")
+            print(f"ℹ️  Note: Used 4× enhanced for feature detection, but displaying original Zeiss in overlay")
         print(f"{'='*70}\n")
 
         return overlay
