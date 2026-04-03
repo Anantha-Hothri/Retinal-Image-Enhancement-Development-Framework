@@ -128,10 +128,13 @@ export default function ComparisonViewer({
         if (blob) {
           const url = URL.createObjectURL(blob);
           setHeatmapUrl(url);
+        } else {
+          console.error('Failed to create blob from canvas');
         }
       });
     } catch (error) {
-      console.error('Error generating heatmap:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      console.error('Error generating heatmap:', errorMessage, error);
     } finally {
       setGeneratingHeatmap(false);
     }
@@ -142,7 +145,7 @@ export default function ComparisonViewer({
       const img = new Image();
       img.crossOrigin = 'anonymous';
       img.onload = () => resolve(img);
-      img.onerror = reject;
+      img.onerror = (e) => reject(new Error(`Failed to load image from ${url}`));
       img.src = url;
     });
   };
