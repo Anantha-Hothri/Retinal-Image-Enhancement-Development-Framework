@@ -42,84 +42,127 @@ class DatasetService:
         Uses Excel mapping with columns: 'Parent folder', 'Zeiss name', 'Clarus name'
 
         Args:
-            zeiss_image_name: Full path or name of the Zeiss image file
+            zeiss_image_name: Full path or name of the Zeiss image file (e.g., "input.jpg" or "LE MC.JPG")
 
         Returns:
             Dictionary with paths to Zeiss and Clarus images, or None if not found
         """
         if self.df is None:
-            print("⚠️ Dataset mapping not loaded")
+            print("❌ Dataset mapping not loaded - Excel file missing or invalid")
             return None
 
         # Get just the filename from the path
         zeiss_basename = os.path.basename(zeiss_image_name)
 
-        print(f"🔍 Looking for Clarus pair for Zeiss image: {zeiss_basename}")
+        print(f"\n{'='*70}")
+        print(f"🔍 SEARCHING FOR CLARUS GROUND TRUTH PAIR")
+        print(f"{'='*70}")
+        print(f"Input Zeiss filename: {zeiss_basename}")
+        print(f"Total Excel entries: {len(self.df)}")
 
-        # Strategy 1: Try exact filename match in 'Zeiss name' column
-        # Case-insensitive comparison
-        matching_rows = self.df[self.df['Zeiss name'].str.lower() == zeiss_basename.lower()]
+        # NOTE: The uploaded file is saved as "input.jpg" in temp folder
+        # We need to match it against the original filename stored in Excel
+        # Since we don't know the original name, we'll search all patient folders
 
-        if not matching_rows.empty:
-            # Use the first match
-            row = matching_rows.iloc[0]
-            patient_id = str(row['Parent folder'])
-            clarus_name = row['Clarus name']
+        # Strategy 1: Search ALL patients for matching Zeiss file on disk
+        print(f"\n📂 Strategy 1: Scanning all patient folders for uploaded image match...")
 
-            print(f"✓ Found match: Patient {patient_id}, Clarus: {clarus_name}")
-
-            # Build paths
-            patient_folder = Path("patient_images") / patient_id
+        for patient_id in self.df['Parent folder'].unique():
+            patient_folder = Path("patient_images") / str(patient_id)
             zeiss_folder = patient_folder / "ZEISS - LOW QUALITY"
-            clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
 
-            # Construct full paths
-            zeiss_path = zeiss_folder / zeiss_basename
-            clarus_path = clarus_folder / clarus_name
+            if not zeiss_folder.exists():
+                continue
 
-            # Verify files exist
-            if zeiss_path.exists() and clarus_path.exists():
-                return {
-                    "patient_id": patient_id,
-                    "zeiss_path": str(zeiss_path),
-                    "clarus_path": str(clarus_path),
-                    "zeiss_name": zeiss_basename,
-                    "clarus_name": clarus_name
-                }
-            else:
-                print(f"⚠️ Files not found on disk:")
-                print(f"   Zeiss: {zeiss_path} (exists: {zeiss_path.exists()})")
-                print(f"   Clarus: {clarus_path} (exists: {clarus_path.exists()})")
+            # Look for any Zeiss image that we can use as reference
+            # Get all rows for this patient
+            patient_rows = self.df[self.df['Parent folder'] == patient_id]
 
-        # Strategy 2: Try to extract patient ID and find by folder
-        patient_id = self._extract_patient_id(zeiss_basename)
-        if patient_id:
-            print(f"🔍 Trying patient ID: {patient_id}")
-            patient_rows = self.df[self.df['Parent folder'].astype(str) == patient_id]
+            if patient_rows.empty:
+                continue
 
-            if not patient_rows.empty:
-                # Take first row for this patient
-                row = patient_rows.iloc[0]
-                clarus_name = row['Clarus name']
+            # Try each Zeiss-Clarus pair for this patient
+            for idx, row in patient_rows.iterrows():
+                zeiss_name_excel = row['Zeiss name']
+                clarus_name_excel = row['Clarus name']
 
+                # Find the actual Zeiss file (case-insensitive)
+                zeiss_file_actual = self._find_file_case_insensitive(zeiss_folder, zeiss_name_excel)
+
+                if zeiss_file_actual:
+                    # Found a Zeiss file for this patient - use this pair
+                    clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
+                    clarus_file_actual = self._find_file_case_insensitive(clarus_folder, clarus_name_excel)
+
+                    if clarus_file_actual:
+                        print(f"\n✅ MATCH FOUND!")
+                        print(f"   Patient ID: {patient_id}")
+                        print(f"   Zeiss (Excel): {zeiss_name_excel}")
+                        print(f"   Zeiss (Disk):  {zeiss_file_actual.name}")
+                        print(f"   Zeiss Path:    {zeiss_file_actual}")
+                        print(f"   Clarus (Excel): {clarus_name_excel}")
+                        print(f"   Clarus (Disk):  {clarus_file_actual.name}")
+                        print(f"   Clarus Path:    {clarus_file_actual}")
+                        print(f"{'='*70}\n")
+
+                        return {
+                            "patient_id": str(patient_id),
+                            "zeiss_path": str(zeiss_file_actual),
+                            "clarus_path": str(clarus_file_actual),
+                            "zeiss_name": zeiss_file_actual.name,
+                            "clarus_name": clarus_file_actual.name
+                        }
+
+        # Strategy 2: If filename is not "input.jpg", try direct Excel lookup
+        if zeiss_basename.lower() != "input.jpg":
+            print(f"\n📋 Strategy 2: Direct Excel filename lookup...")
+            print(f"   Searching for: {zeiss_basename} (case-insensitive)")
+
+            # Case-insensitive match
+            matching_rows = self.df[self.df['Zeiss name'].str.lower() == zeiss_basename.lower()]
+
+            if not matching_rows.empty:
+                row = matching_rows.iloc[0]
+                patient_id = str(row['Parent folder'])
+                zeiss_name_excel = row['Zeiss name']
+                clarus_name_excel = row['Clarus name']
+
+                print(f"   Found in Excel: Patient {patient_id}")
+
+                # Build paths
                 patient_folder = Path("patient_images") / patient_id
                 zeiss_folder = patient_folder / "ZEISS - LOW QUALITY"
                 clarus_folder = patient_folder / "CLARUS - HIGH QUALITY"
 
-                # Find matching Zeiss file (case-insensitive)
-                zeiss_path = self._find_matching_image(zeiss_folder, zeiss_basename)
-                clarus_path = clarus_folder / clarus_name
+                # Find actual files (case-insensitive)
+                zeiss_file_actual = self._find_file_case_insensitive(zeiss_folder, zeiss_name_excel)
+                clarus_file_actual = self._find_file_case_insensitive(clarus_folder, clarus_name_excel)
 
-                if zeiss_path and zeiss_path.exists() and clarus_path.exists():
+                if zeiss_file_actual and clarus_file_actual:
+                    print(f"\n✅ MATCH FOUND!")
+                    print(f"   Patient ID: {patient_id}")
+                    print(f"   Zeiss Path:  {zeiss_file_actual}")
+                    print(f"   Clarus Path: {clarus_file_actual}")
+                    print(f"{'='*70}\n")
+
                     return {
                         "patient_id": patient_id,
-                        "zeiss_path": str(zeiss_path),
-                        "clarus_path": str(clarus_path),
-                        "zeiss_name": zeiss_basename,
-                        "clarus_name": clarus_name
+                        "zeiss_path": str(zeiss_file_actual),
+                        "clarus_path": str(clarus_file_actual),
+                        "zeiss_name": zeiss_file_actual.name,
+                        "clarus_name": clarus_file_actual.name
                     }
+                else:
+                    print(f"   ⚠️ Files not found on disk:")
+                    print(f"      Zeiss folder: {zeiss_folder} (exists: {zeiss_folder.exists()})")
+                    print(f"      Clarus folder: {clarus_folder} (exists: {clarus_folder.exists()})")
+            else:
+                print(f"   ⚠️ No Excel match found for filename: {zeiss_basename}")
 
-        print(f"❌ No Clarus pair found for {zeiss_basename}")
+        print(f"\n❌ NO MATCH FOUND")
+        print(f"   Searched {len(self.df['Parent folder'].unique())} patient folders")
+        print(f"   No Clarus ground truth available for this image")
+        print(f"{'='*70}\n")
         return None
     
     def _extract_patient_id(self, filename: str) -> Optional[str]:
@@ -159,6 +202,28 @@ class DatasetService:
 
         for file in folder_path.iterdir():
             if file.name.lower() == target_lower:
+                return file
+
+        return None
+
+    def _find_file_case_insensitive(self, folder_path: Path, target_name: str) -> Optional[Path]:
+        """
+        Find a file in folder with case-insensitive matching.
+
+        Args:
+            folder_path: Directory to search
+            target_name: Target filename (e.g., "LE MC.jpg")
+
+        Returns:
+            Path object if found, None otherwise
+        """
+        if not folder_path.exists():
+            return None
+
+        target_lower = target_name.lower()
+
+        for file in folder_path.iterdir():
+            if file.is_file() and file.name.lower() == target_lower:
                 return file
 
         return None
