@@ -228,30 +228,40 @@ class DatasetService:
 
         return None
     
-    def create_overlay_visualization(self, zeiss_img: np.ndarray, clarus_img: np.ndarray, 
+    def create_overlay_visualization(self, zeiss_img: np.ndarray, clarus_img: np.ndarray,
                                     alpha: float = 0.5) -> np.ndarray:
         """
-        Create overlay visualization of Zeiss on Clarus (similar to fixed_trial4_updated.py).
-        
+        Create overlay visualization of Clarus resized to Zeiss dimensions.
+
+        This maintains the original Zeiss image size and resizes Clarus to match it,
+        which is correct since we want to see how well the Zeiss image registers
+        with the ground truth at the original Zeiss resolution.
+
         Args:
-            zeiss_img: Zeiss image (BGR)
-            clarus_img: Clarus image (BGR)
+            zeiss_img: Zeiss image (BGR) - this size will be preserved
+            clarus_img: Clarus image (BGR) - will be resized to match Zeiss
             alpha: Blending factor (0.5 = 50% each image)
-        
+
         Returns:
-            Overlay image
+            Overlay image at Zeiss dimensions
         """
-        # Resize Zeiss to match Clarus dimensions
+        print(f"🎨 Creating overlay: Zeiss {zeiss_img.shape} | Clarus {clarus_img.shape}")
+
+        # Resize Clarus to match Zeiss dimensions (NOT the other way around)
         if zeiss_img.shape != clarus_img.shape:
-            zeiss_resized = cv2.resize(zeiss_img, 
-                                      (clarus_img.shape[1], clarus_img.shape[0]), 
-                                      interpolation=cv2.INTER_CUBIC)
+            clarus_resized = cv2.resize(clarus_img,
+                                       (zeiss_img.shape[1], zeiss_img.shape[0]),
+                                       interpolation=cv2.INTER_CUBIC)
+            print(f"   Resized Clarus to {clarus_resized.shape} to match Zeiss")
         else:
-            zeiss_resized = zeiss_img
-        
+            clarus_resized = clarus_img
+            print(f"   Images already same size, no resize needed")
+
         # Create overlay using weighted addition
-        overlay = cv2.addWeighted(clarus_img, alpha, zeiss_resized, alpha, 0)
-        
+        overlay = cv2.addWeighted(zeiss_img, alpha, clarus_resized, alpha, 0)
+
+        print(f"   Overlay output: {overlay.shape}")
+
         return overlay
     
     def get_all_patient_pairs(self) -> List[Dict[str, str]]:
